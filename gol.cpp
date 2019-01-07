@@ -1,8 +1,12 @@
 #include <cmath>
+#include <fstream>
 #include <mpi.h>
+#include <sstream>
 #include <stdio.h>
+#include <stdexcept>
 #include <stdlib.h>
 #include <string.h>
+#include <string>
 #include <vector>
 
 // Generic function for computing neighbor indices of a cell
@@ -32,21 +36,16 @@ grid_nbrs get_grid_nbrs(int idx, int size)
 
 class GOL
 {
-    using world_grid = std::vector<unsigned char>;
+    using world_grid = std::vector<char>;
 
     public:
-    // +2 for extra outer rows and columns for communicating with neighbors
-    GOL(int s, int ws) :size(s+2), wsize(ws)
+    // Constructor for a boring, default world
+    GOL(int s, int ws)
     {
-        // Gather and create MPI data
-        MPI_Comm_rank(MPI_COMM_WORLD, &rank);
-        MPI_Type_vector(size-2, 1, size, MPI::UNSIGNED_CHAR, &GRID_COLUMNS);
-        MPI_Type_commit(&GRID_COLUMNS);
+        init(s,ws);
 
-        // Build initial population
+        // Populate world with non-adjacent columns that never change
         bool isAlive = false;
-        old_world.assign(size*size,0);
-        new_world.assign(size*size,0);
         for (int x=1; x<size-1; x++)
         {
             for (int y=1; y<size-1; y++)
@@ -54,6 +53,77 @@ class GOL
                 int c = x*size+y;
                 old_world[c] = isAlive;
                 isAlive = !isAlive;
+            }
+        }
+    }
+
+    // Constructor for a world from a file
+    GOL(const char *file_name, int ws)
+    {
+        // Read and compute size information from file header
+        int rep_size, reps;
+        std::fstream input(file_name, std::ios_base::in);
+        std::string header_string;
+        getline(input, header_string);
+        std::stringstream header(header_string);
+        header >> rep_size >> reps;
+
+        init(rep_size*reps, ws);
+
+        // Populate world from rest of file
+
+        // Rank 0 reads the data and sends each chunk to the appropriate other rank
+        if (rank==0)
+        {
+            std::vector<std::vector<char>> input_buffers(rep_size, std::vector<char>(rep_size*reps));
+            int buf_num = 0;
+            // Rows of MPI ranks
+            for (int wrow=0; wrow < wsize; wrow++)
+            {
+                // Rows of cells
+                for (int row=1; row < size-1; row++)
+                {
+                    // After input exhausted, repeat input from buffers
+                    auto &buf = input_buffers[buf_num % rep_size];
+                    if (buf_num < rep_size)
+                    {
+                        input.read(buf.data(), rep_size);
+                        input.ignore(1); // newline
+                        // Duplicate the row horizontally
+                        for (int c=1; c<reps; c++)
+                        {
+                            memcpy(&buf[c*rep_size], buf.data(), rep_size*sizeof(char));
+                        }
+                        chars_to_binary(buf);
+                    }
+                    buf_num++;
+
+                    // Divide cells among MPI ranks
+                    for (int c=0; c<wsize; c++)
+                    {
+                        int pid=wrow*wsize+c;
+                        if (pid==0)
+                        {
+                            // +1 to avoid external rows and columns meant for communication
+                            memcpy(&old_world[row*size+1], &buf[c*(size-2)], (size-2)*sizeof(char));
+                        }
+                        else
+                        {
+                            MPI_Send(&buf[c*(size-2)], size-2, MPI::UNSIGNED_CHAR, pid, 0, MPI_COMM_WORLD);
+                        }
+                    }
+                }
+            }
+            input.close();
+        }
+        else
+        {
+            input.close();
+            // Receive our chunks (rows) of data from file
+            // +1 to avoid external rows and columns meant for communication
+            for (int r=1; r<size-1; r++)
+            {
+                MPI_Recv(&old_world[r*size+1], size-2, MPI::UNSIGNED_CHAR, 0, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
             }
         }
     }
@@ -68,6 +138,9 @@ class GOL
         MPI_Type_free(&GRID_COLUMNS);
     }
     */
+
+    int local_size() {return size-2;}
+    int world_size() {return wsize;}
 
     void next_gen()
     {
@@ -136,7 +209,7 @@ class GOL
     {
         if (rank==0)
         {
-            std::vector<unsigned char> buf(size-2);
+            std::vector<char> buf(size-2);
 
             // Rows of MPI ranks
             for (int wrow=0; wrow < wsize; wrow++)
@@ -182,7 +255,7 @@ class GOL
     {
         if (rank==0)
         {
-            std::vector<unsigned char> buf(size-2);
+            std::vector<char> buf(size-2);
 
             // Rows of MPI ranks
             for (int wrow=0; wrow < wsize; wrow++)
@@ -224,6 +297,29 @@ class GOL
     }
 
     private:
+    void init(int s, int ws)
+    {
+        if (s % ws != 0) throw std::invalid_argument("GOL: Population cannot be evenly divided among MPI ranks");
+        // +2 for extra outer rows and columns for communicating with neighbors
+        size =s / ws + 2;
+        wsize = ws;
+
+        MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+        MPI_Type_vector(size-2, 1, size, MPI::UNSIGNED_CHAR, &GRID_COLUMNS);
+        MPI_Type_commit(&GRID_COLUMNS);
+
+        old_world.assign(size*size,0);
+        new_world.assign(size*size,0);
+    }
+    // Convert input characters to binary
+    void chars_to_binary(std::vector<char>& v)
+    {
+        for (char& c : v)
+        {
+            if (c=='*') c=1;
+            else c=0;
+        }
+    }
     void next_gen_cell(int c)
     {
         // Count neighbors
@@ -275,8 +371,14 @@ int main(int argc, char **argv)
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &nranks);
 
+    if (argc < 2)
+    {
+        fprintf(stderr, "Usage: %s <input file>\n", argv[0]);
+        MPI_Finalize();
+        exit(1);
+    }
+
     // Define GOL constants
-    const int size       = 2;
     const int num_gens   = 100;
     const int wsize      = sqrt(nranks);
     if (wsize*wsize != nranks)
@@ -286,16 +388,12 @@ int main(int argc, char **argv)
         exit(1);
     }
 
-    // Create and print initial world
-    GOL world(size,wsize);
-    if (rank==0) print_sep(size*wsize);
-
-    // Run main loop
+    GOL world(argv[1],wsize);
     for (int gen_num = 0; gen_num < num_gens; gen_num++)
     {
         world.next_gen();
         world.print();
-        if (rank==0) print_sep(size*wsize);
+        if (rank==0) print_sep(world.local_size() * world.world_size());
     }
 
     // Exit
