@@ -3,7 +3,6 @@
 #include <mpi.h>
 #include <sstream>
 #include <stdio.h>
-#include <stdexcept>
 #include <stdlib.h>
 #include <string.h>
 #include <string>
@@ -40,9 +39,9 @@ class GOL
 
     public:
     // Constructor for a boring, default world
-    GOL(int s, int ws)
+    GOL(int s, int ws) :is_valid(false)
     {
-        init(s,ws);
+        if (!init(s,ws)) return;
 
         // Populate world with non-adjacent columns that never change
         bool isAlive = false;
@@ -55,20 +54,32 @@ class GOL
                 isAlive = !isAlive;
             }
         }
+        is_valid = true;
     }
 
     // Constructor for a world from a file
-    GOL(const char *file_name, int ws)
+    GOL(const char *file_name, int ws) :is_valid(false)
     {
+        MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+
         // Read and compute size information from file header
         int rep_size, reps;
         std::fstream input(file_name, std::ios_base::in);
+        if (!input.is_open())
+        {
+            if (rank==0) fprintf(stderr, "GOL: Unable to open input file\n");
+            return;
+        }
         std::string header_string;
         getline(input, header_string);
         std::stringstream header(header_string);
         header >> rep_size >> reps;
-
-        init(rep_size*reps, ws);
+        if (rep_size < 1 || reps < 1)
+        {
+            if (rank==0) fprintf(stderr, "GOL: Invalid header values in input file\n");
+            return;
+        }
+        if (!init(rep_size*reps, ws)) return;
 
         // Populate world from rest of file
 
@@ -88,7 +99,18 @@ class GOL
                     if (buf_num < rep_size)
                     {
                         input.read(buf.data(), rep_size);
-                        input.ignore(1); // newline
+                        if (input.eof())
+                        {
+                            fprintf(stderr, "GOL: Unexpected eol while reading input file\n");
+                            return;
+                        }
+                        char nline = ' ';
+                        input.read(&nline, 1); // newline
+                        if (nline != '\n')
+                        {
+                            fprintf(stderr, "GOL: Bad format for input file (missing newline at end of row)\n");
+                            return;
+                        }
                         // Duplicate the row horizontally
                         for (int c=1; c<reps; c++)
                         {
@@ -109,7 +131,7 @@ class GOL
                         }
                         else
                         {
-                            MPI_Send(&buf[c*(size-2)], size-2, MPI::UNSIGNED_CHAR, pid, 0, MPI_COMM_WORLD);
+                            MPI_Send(&buf[c*(size-2)], size-2, MPI::CHAR, pid, 0, MPI_COMM_WORLD);
                         }
                     }
                 }
@@ -123,9 +145,12 @@ class GOL
             // +1 to avoid external rows and columns meant for communication
             for (int r=1; r<size-1; r++)
             {
-                MPI_Recv(&old_world[r*size+1], size-2, MPI::UNSIGNED_CHAR, 0, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+                MPI_Status status;
+                MPI_Recv(&old_world[r*size+1], size-2, MPI::CHAR, 0, MPI_ANY_TAG, MPI_COMM_WORLD, &status);
+                if (status.MPI_TAG == 1) return;
             }
         }
+        is_valid = true;
     }
 
     /*
@@ -139,6 +164,8 @@ class GOL
     }
     */
 
+    // Should be called before running an instance created from an input file
+    bool world_is_valid()  {return is_valid;}
     int local_size() {return size-2;}
     int world_size() {return wsize;}
 
@@ -161,24 +188,24 @@ class GOL
         // Exchange external cells with other ranks
 
         // Exchange top and bottom rows
-        MPI_Sendrecv(&w[s+1],       s-2, MPI::UNSIGNED_CHAR, n.t,  0,
-                     &w[s*(s-1)+1], s-2, MPI::UNSIGNED_CHAR, n.b,  0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+        MPI_Sendrecv(&w[s+1],       s-2, MPI::CHAR, n.t,  0,
+                     &w[s*(s-1)+1], s-2, MPI::CHAR, n.b,  0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
 
-        MPI_Sendrecv(&w[s*(s-2)+1], s-2, MPI::UNSIGNED_CHAR, n.b,  1,
-                     &w[1],         s-2, MPI::UNSIGNED_CHAR, n.t,  1, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+        MPI_Sendrecv(&w[s*(s-2)+1], s-2, MPI::CHAR, n.b,  1,
+                     &w[1],         s-2, MPI::CHAR, n.t,  1, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
 
         // Exchange diagonal elements
-        MPI_Sendrecv(&w[s+1],         1, MPI::UNSIGNED_CHAR, n.tl, 2,
-                     &w[s*s-1],       1, MPI::UNSIGNED_CHAR, n.br, 2, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+        MPI_Sendrecv(&w[s+1],         1, MPI::CHAR, n.tl, 2,
+                     &w[s*s-1],       1, MPI::CHAR, n.br, 2, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
 
-        MPI_Sendrecv(&w[s*(s-2)+s-2], 1, MPI::UNSIGNED_CHAR, n.br, 3,
-                     &w[0],           1, MPI::UNSIGNED_CHAR, n.tl, 3, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+        MPI_Sendrecv(&w[s*(s-2)+s-2], 1, MPI::CHAR, n.br, 3,
+                     &w[0],           1, MPI::CHAR, n.tl, 3, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
 
-        MPI_Sendrecv(&w[s+s-2],       1, MPI::UNSIGNED_CHAR, n.tr, 4,
-                     &w[s*(s-1)],     1, MPI::UNSIGNED_CHAR, n.bl, 4, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+        MPI_Sendrecv(&w[s+s-2],       1, MPI::CHAR, n.tr, 4,
+                     &w[s*(s-1)],     1, MPI::CHAR, n.bl, 4, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
 
-        MPI_Sendrecv(&w[s*(s-2)+1],   1, MPI::UNSIGNED_CHAR, n.bl, 5,
-                     &w[s-1],         1, MPI::UNSIGNED_CHAR, n.tr, 5, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+        MPI_Sendrecv(&w[s*(s-2)+1],   1, MPI::CHAR, n.bl, 5,
+                     &w[s-1],         1, MPI::CHAR, n.tr, 5, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
        
         // Exchange left and right columns
         MPI_Sendrecv(&w[s+1],         1, GRID_COLUMNS,       n.l,  6,
@@ -226,7 +253,7 @@ class GOL
                         }
                         else
                         {
-                            MPI_Recv(&buf[0], size-2, MPI::UNSIGNED_CHAR, pid, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+                            MPI_Recv(&buf[0], size-2, MPI::CHAR, pid, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
                         }
 
                         // Individual cells
@@ -245,7 +272,7 @@ class GOL
         {
             for (int row=1; row < size-1; row++)
             {
-                MPI_Send(&new_world[row*size+1], size-2, MPI::UNSIGNED_CHAR, 0, 0, MPI_COMM_WORLD);
+                MPI_Send(&new_world[row*size+1], size-2, MPI::CHAR, 0, 0, MPI_COMM_WORLD);
             }
         }
     }
@@ -272,7 +299,7 @@ class GOL
                         }
                         else
                         {
-                            MPI_Recv(&buf[0], size, MPI::UNSIGNED_CHAR, pid, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+                            MPI_Recv(&buf[0], size, MPI::CHAR, pid, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
                         }
 
                         // Individual cells
@@ -291,25 +318,31 @@ class GOL
         {
             for (int row=0; row < size; row++)
             {
-                MPI_Send(&new_world[row*size], size, MPI::UNSIGNED_CHAR, 0, 0, MPI_COMM_WORLD);
+                MPI_Send(&new_world[row*size], size, MPI::CHAR, 0, 0, MPI_COMM_WORLD);
             }
         }
     }
 
     private:
-    void init(int s, int ws)
+    bool init(int s, int ws)
     {
-        if (s % ws != 0) throw std::invalid_argument("GOL: Population cannot be evenly divided among MPI ranks");
+        MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+
+        if (s % ws != 0)
+        {
+            if (rank==0) fprintf(stderr, "GOL: Population cannot be evenly divided among MPI ranks\n");
+            return false;
+        }
         // +2 for extra outer rows and columns for communicating with neighbors
         size =s / ws + 2;
         wsize = ws;
 
-        MPI_Comm_rank(MPI_COMM_WORLD, &rank);
-        MPI_Type_vector(size-2, 1, size, MPI::UNSIGNED_CHAR, &GRID_COLUMNS);
+        MPI_Type_vector(size-2, 1, size, MPI::CHAR, &GRID_COLUMNS);
         MPI_Type_commit(&GRID_COLUMNS);
 
         old_world.assign(size*size,0);
         new_world.assign(size*size,0);
+        return true;
     }
     // Convert input characters to binary
     void chars_to_binary(std::vector<char>& v)
@@ -349,6 +382,7 @@ class GOL
         }
     }
 
+    bool is_valid; // whether world was able to be created (useful for worlds created from an input file)
     int size;  // Local population size
     int rank;  // MPI rank
     int wsize; // Global size ( sqrt(no. of MPI ranks) )
@@ -373,7 +407,7 @@ int main(int argc, char **argv)
 
     if (argc < 3)
     {
-        fprintf(stderr, "Usage: %s <input file> <no. generations> <print frequency>\n", argv[0]);
+        if (rank==0) fprintf(stderr, "Usage: %s <input file> <no. generations> <print frequency>\n", argv[0]);
         MPI_Finalize();
         exit(1);
     }
@@ -385,19 +419,23 @@ int main(int argc, char **argv)
     if (argc > 3) print_freq = atoi(argv[3]);
     if (wsize*wsize != nranks)
     {
-        fprintf(stderr, "Error: No. MPI ranks must be a perfect square\n");
+        if (rank==0) fprintf(stderr, "Error: No. MPI ranks must be a perfect square\n");
         MPI_Finalize();
         exit(1);
     }
 
     GOL world(argv[1],wsize);
-    for (int gen_num = 0; gen_num < num_gens; gen_num++)
+    if (rank==0 && !world.world_is_valid()) MPI_Abort(MPI_COMM_WORLD,1);
+    if (world.world_is_valid())
     {
-        world.next_gen();
-        if (gen_num % print_freq == 0)
+        for (int gen_num = 0; gen_num < num_gens; gen_num++)
         {
-            world.print();
-            if (rank==0) print_sep(world.local_size() * world.world_size());
+            world.next_gen();
+            if (gen_num % print_freq == 0)
+            {
+                world.print();
+                if (rank==0) print_sep(world.local_size() * world.world_size());
+            }
         }
     }
 
