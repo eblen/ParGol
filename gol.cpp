@@ -371,16 +371,18 @@ int main(int argc, char **argv)
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &nranks);
 
-    if (argc < 2)
+    if (argc < 3)
     {
-        fprintf(stderr, "Usage: %s <input file>\n", argv[0]);
+        fprintf(stderr, "Usage: %s <input file> <no. generations> <print frequency>\n", argv[0]);
         MPI_Finalize();
         exit(1);
     }
 
     // Define GOL constants
-    const int num_gens   = 100;
     const int wsize      = sqrt(nranks);
+    const int num_gens   = atoi(argv[2]);
+    int print_freq       = num_gens-1; // Print first and last generations only by default
+    if (argc > 3) print_freq = atoi(argv[3]);
     if (wsize*wsize != nranks)
     {
         fprintf(stderr, "Error: No. MPI ranks must be a perfect square\n");
@@ -392,8 +394,11 @@ int main(int argc, char **argv)
     for (int gen_num = 0; gen_num < num_gens; gen_num++)
     {
         world.next_gen();
-        world.print();
-        if (rank==0) print_sep(world.local_size() * world.world_size());
+        if (gen_num % print_freq == 0)
+        {
+            world.print();
+            if (rank==0) print_sep(world.local_size() * world.world_size());
+        }
     }
 
     // Exit
