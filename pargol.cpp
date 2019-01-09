@@ -178,8 +178,16 @@ class GOL
     {
         int s = size;
 
+        #pragma omp single
+        {
+
         // Compute internal cells
+        #pragma omp task
+        {
+
         time_stamps.start(task_name::internal);
+
+        #pragma omp parallel for
         for (int x=2; x<s-2; x++)
         {
             for (int y=2; y<s-2; y++)
@@ -187,12 +195,18 @@ class GOL
                 next_gen_cell(x*s+y);
             }
         }
+
         time_stamps.stop(task_name::internal);
+
+        }  // End task for computing internal cells
+
+        // Exchange external cells with other ranks
+        #pragma omp task
+        {
 
         grid_nbrs n = get_grid_nbrs(rank,wsize);
         world_grid &w = old_world;
 
-        // Exchange external cells with other ranks
         time_stamps.start(task_name::comm);
 
         // Exchange top and bottom rows
@@ -221,23 +235,32 @@ class GOL
 
         MPI_Sendrecv(&w[s+s-2],       1, GRID_COLUMNS,       n.r,  7,
                      &w[s],           1, GRID_COLUMNS,       n.l,  7, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+
         time_stamps.stop(task_name::comm);
 
         // Compute external cells
+
         time_stamps.start(task_name::external);
 
         // Compute top and bottom rows
+        #pragma omp parallel for
         for (int y=1; y<s-1; y++) {
             next_gen_cell(s+y);
             next_gen_cell(s*(s-2)+y);
         }
 
         // Compute left and right columns
+        #pragma omp parallel for
         for (int x=1; x<s-1; x++) {
             next_gen_cell(s*x+1);
             next_gen_cell(s*x+s-2);
         }
+        
         time_stamps.stop(task_name::external);
+
+        } // End task for computing external cells
+
+        } // End entire OpenMP region
 
         // Commit changes by swapping worlds
         old_world.swap(new_world);
@@ -425,7 +448,15 @@ int main(int argc, char **argv)
 {
     int rank;
     int nranks;
-    MPI_Init(&argc, &argv);
+    int required_thread_support = MPI_THREAD_SERIALIZED;
+    int provided_thread_support;
+    MPI_Init_thread(&argc, &argv, required_thread_support, &provided_thread_support);
+    if (required_thread_support != provided_thread_support)
+    {
+        if (rank==0) fprintf(stderr, "Error: MPI library does not provide the required level of thread support");
+        MPI_Finalize();
+        exit(1);
+    }
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &nranks);
 
