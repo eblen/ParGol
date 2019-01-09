@@ -232,18 +232,20 @@ class GOL
         old_world.swap(new_world);
     }
 
-    void print()
+    void print(int max_size)
     {
         if (rank==0)
         {
             std::vector<char> buf(size-2);
 
             // Rows of MPI ranks
+            int rows_printed = 0;
             for (int wrow=0; wrow < wsize; wrow++)
             {
                 // Rows of cells
                 for (int row=1; row < size-1; row++)
                 {
+                    int cells_printed = 0;
                     // MPI ranks containing cells on current row
                     for (int pid=wrow*wsize; pid < wrow*wsize+wsize; pid++)
                     {
@@ -257,20 +259,30 @@ class GOL
                         }
 
                         // Individual cells
-                        for (int x=0; x < size-2; x++)
+                        int cells_to_print = std::min(size-2, max_size - cells_printed);
+                        for (int x=0; x < cells_to_print; x++)
                         {
                             if (buf[x]) printf("*");
                             else printf(" ");
                         }
+                        cells_printed += cells_to_print;
+                        if (cells_printed >= max_size) break;
                     }
                     printf("\n");
+                    rows_printed++;
+                    if (rows_printed >= max_size) return;
                 }
             }
         }
 
         else
         {
-            for (int row=1; row < size-1; row++)
+            int start_col = (rank % wsize) * (size-2);
+            if (start_col >= max_size) return;
+            int start_row = (rank / wsize);
+
+            int num_rows = std::min(max_size - start_row*(size-2), size-2);
+            for (int row=1; row < num_rows+1; row++)
             {
                 MPI_Send(&new_world[row*size+1], size-2, MPI::CHAR, 0, 0, MPI_COMM_WORLD);
             }
@@ -407,7 +419,7 @@ int main(int argc, char **argv)
 
     if (argc < 3)
     {
-        if (rank==0) fprintf(stderr, "Usage: %s <input file> <no. generations> <print frequency>\n", argv[0]);
+        if (rank==0) fprintf(stderr, "Usage: %s <input file> <no. generations> <print size> <print frequency>\n", argv[0]);
         MPI_Finalize();
         exit(1);
     }
@@ -415,8 +427,10 @@ int main(int argc, char **argv)
     // Define GOL constants
     const int wsize      = sqrt(nranks);
     const int num_gens   = atoi(argv[2]);
+    int print_max_size = 100;
+    if (argc > 3) print_max_size = atoi(argv[3]);
     int print_freq       = num_gens-1; // Print first and last generations only by default
-    if (argc > 3) print_freq = atoi(argv[3]);
+    if (argc > 4) print_freq = atoi(argv[4]);
     if (wsize*wsize != nranks)
     {
         if (rank==0) fprintf(stderr, "Error: No. MPI ranks must be a perfect square\n");
@@ -433,8 +447,8 @@ int main(int argc, char **argv)
             world.next_gen();
             if (gen_num % print_freq == 0)
             {
-                world.print();
-                if (rank==0) print_sep(world.local_size() * world.world_size());
+                world.print(print_max_size);
+                if (rank==0) print_sep(std::min(print_max_size, world.local_size() * world.world_size()));
             }
         }
     }
