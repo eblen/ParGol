@@ -8,6 +8,8 @@
 #include <string>
 #include <vector>
 
+#include "timestamps.h"
+
 // Generic function for computing neighbor indices of a cell
 struct grid_nbrs {int tl,t,tr,l,r,bl,b,br;};
 grid_nbrs get_grid_nbrs(int idx, int size)
@@ -38,8 +40,10 @@ class GOL
     using world_grid = std::vector<char>;
 
     public:
+    enum task_name {internal, comm, external, NUM_TASKS};
+
     // Constructor for a boring, default world
-    GOL(int s, int ws) :is_valid(false)
+    GOL(int s, int ws) :is_valid(false), time_stamps(task_name::NUM_TASKS)
     {
         if (!init(s,ws)) return;
 
@@ -58,7 +62,7 @@ class GOL
     }
 
     // Constructor for a world from a file
-    GOL(const char *file_name, int ws) :is_valid(false)
+    GOL(const char *file_name, int ws) :is_valid(false), time_stamps(task_name::NUM_TASKS)
     {
         MPI_Comm_rank(MPI_COMM_WORLD, &rank);
 
@@ -165,15 +169,17 @@ class GOL
     */
 
     // Should be called before running an instance created from an input file
-    bool world_is_valid()  {return is_valid;}
-    int local_size() {return size-2;}
-    int world_size() {return wsize;}
+    bool world_is_valid() const {return is_valid;}
+    int local_size() const {return size-2;}
+    int world_size() const {return wsize;}
+    const TimeStamps& get_time_stamps() const {return time_stamps;}
 
     void next_gen()
     {
         int s = size;
 
         // Compute internal cells
+        time_stamps.start(task_name::internal);
         for (int x=2; x<s-2; x++)
         {
             for (int y=2; y<s-2; y++)
@@ -181,11 +187,13 @@ class GOL
                 next_gen_cell(x*s+y);
             }
         }
+        time_stamps.stop(task_name::internal);
 
         grid_nbrs n = get_grid_nbrs(rank,wsize);
         world_grid &w = old_world;
 
         // Exchange external cells with other ranks
+        time_stamps.start(task_name::comm);
 
         // Exchange top and bottom rows
         MPI_Sendrecv(&w[s+1],       s-2, MPI::CHAR, n.t,  0,
@@ -213,8 +221,10 @@ class GOL
 
         MPI_Sendrecv(&w[s+s-2],       1, GRID_COLUMNS,       n.r,  7,
                      &w[s],           1, GRID_COLUMNS,       n.l,  7, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+        time_stamps.stop(task_name::comm);
 
         // Compute external cells
+        time_stamps.start(task_name::external);
 
         // Compute top and bottom rows
         for (int y=1; y<s-1; y++) {
@@ -227,12 +237,13 @@ class GOL
             next_gen_cell(s*x+1);
             next_gen_cell(s*x+s-2);
         }
+        time_stamps.stop(task_name::external);
 
         // Commit changes by swapping worlds
         old_world.swap(new_world);
     }
 
-    void print(int max_size)
+    void print(int max_size) const
     {
         if (rank==0)
         {
@@ -290,7 +301,7 @@ class GOL
     }
 
     // Also print communication cells (primarily for debugging)
-    void printall()
+    void printall() const
     {
         if (rank==0)
         {
@@ -399,6 +410,7 @@ class GOL
     int rank;  // MPI rank
     int wsize; // Global size ( sqrt(no. of MPI ranks) )
     MPI_Datatype GRID_COLUMNS; // Used for communicating columns
+    TimeStamps time_stamps;
     world_grid old_world;
     world_grid new_world;
 };
@@ -451,6 +463,16 @@ int main(int argc, char **argv)
                 if (rank==0) print_sep(std::min(print_max_size, world.local_size() * world.world_size()));
             }
         }
+    }
+
+    // Print performance statistics
+    if (rank==0)
+    {
+        const TimeStamps& ts = world.get_time_stamps();
+        printf("Time for internal compute: %1.2f ms\n", ts.get_total_time(GOL::task_name::internal) / 1000.0);
+        printf("Time for communication:    %1.2f ms\n", ts.get_total_time(GOL::task_name::comm)     / 1000.0);
+        printf("Time for external compute: %1.2f ms\n", ts.get_total_time(GOL::task_name::external) / 1000.0);
+        printf("Internal and comm overlap: %1.2f ms\n", ts.get_overlap(GOL::task_name::internal, GOL::task_name::comm) / 1000.0);
     }
 
     // Exit
