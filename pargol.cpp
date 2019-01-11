@@ -452,6 +452,7 @@ int main(int argc, char **argv)
 
     GOL world(argv[1],wsize);
     if (rank==0 && !world.world_is_valid()) MPI_Abort(MPI_COMM_WORLD,1);
+    long start_time = TimeStamps::get_time();
     if (world.world_is_valid())
     {
         for (int gen_num = 0; gen_num < num_gens; gen_num++)
@@ -464,11 +465,13 @@ int main(int argc, char **argv)
             }
         }
     }
+    long end_time = TimeStamps::get_time();
 
     // Print performance statistics
     if (rank==0)
     {
         const TimeStamps& ts = world.get_time_stamps();
+        printf("Total GOL run time: %1.2f ms\n", (end_time - start_time) / 1000.0);
         printf("Time for internal compute: %1.2f ms\n", ts.get_total_time(GOL::task_name::internal) / 1000.0);
         printf("Time for communication:    %1.2f ms\n", ts.get_total_time(GOL::task_name::comm)     / 1000.0);
         printf("Time for external compute: %1.2f ms\n", ts.get_total_time(GOL::task_name::external) / 1000.0);

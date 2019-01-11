@@ -7,12 +7,12 @@ class TimeStamps
 {
     using time_stamp = std::pair<long, long>;
 
+    public:
     static long get_time()
     {
         return std::chrono::duration_cast<std::chrono::microseconds>(steady_clock::now().time_since_epoch()).count();
     }
 
-    public:
     TimeStamps(int num_tasks)
     {
         time_stamps.resize(num_tasks);
