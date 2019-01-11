@@ -8,6 +8,7 @@
 #include <string>
 #include <vector>
 
+#include "sts/sts.h"
 #include "timestamps.h"
 
 // Generic function for computing neighbor indices of a cell
@@ -43,9 +44,9 @@ class GOL
     enum task_name {internal, comm, external, NUM_TASKS};
 
     // Constructor for a boring, default world
-    GOL(int s, int ws) :is_valid(false), time_stamps(task_name::NUM_TASKS)
+    GOL(int s, int ws, bool useDefaultSchedule) :is_valid(false), time_stamps(task_name::NUM_TASKS)
     {
-        if (!init(s,ws)) return;
+        if (!init(s,ws,useDefaultSchedule)) return;
 
         // Populate world with non-adjacent columns that never change
         bool isAlive = false;
@@ -62,7 +63,7 @@ class GOL
     }
 
     // Constructor for a world from a file
-    GOL(const char *file_name, int ws) :is_valid(false), time_stamps(task_name::NUM_TASKS)
+    GOL(const char *file_name, int ws, bool useDefaultSchedule) :is_valid(false), time_stamps(task_name::NUM_TASKS)
     {
         MPI_Comm_rank(MPI_COMM_WORLD, &rank);
 
@@ -83,7 +84,7 @@ class GOL
             if (rank==0) fprintf(stderr, "GOL: Invalid header values in input file\n");
             return;
         }
-        if (!init(rep_size*reps, ws)) return;
+        if (!init(rep_size*reps, ws, useDefaultSchedule)) return;
 
         // Populate world from rest of file
 
@@ -178,66 +179,75 @@ class GOL
     {
         int s = size;
 
+        sts.nextStep();
         // Compute internal cells
-        time_stamps.start(task_name::internal);
-        for (int x=2; x<s-2; x++)
+        sts.run("internal", [&]
         {
-            for (int y=2; y<s-2; y++)
+            time_stamps.start(task_name::internal);
+            sts.parallel_for("internal_loop", 2, s-2, [&](int x)
             {
-                next_gen_cell(x*s+y);
-            }
-        }
-        time_stamps.stop(task_name::internal);
+                for (int y=2; y<s-2; y++)
+                {
+                    next_gen_cell(x*s+y);
+                }
+            });
+            time_stamps.stop(task_name::internal);
+        });
 
         grid_nbrs n = get_grid_nbrs(rank,wsize);
         world_grid &w = old_world;
 
         // Exchange external cells with other ranks
-        time_stamps.start(task_name::comm);
+        sts.run("external", [&]
+        {
+            time_stamps.start(task_name::comm);
+            // Exchange top and bottom rows
+            MPI_Sendrecv(&w[s+1],       s-2, MPI::CHAR, n.t,  0,
+                         &w[s*(s-1)+1], s-2, MPI::CHAR, n.b,  0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
 
-        // Exchange top and bottom rows
-        MPI_Sendrecv(&w[s+1],       s-2, MPI::CHAR, n.t,  0,
-                     &w[s*(s-1)+1], s-2, MPI::CHAR, n.b,  0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+            MPI_Sendrecv(&w[s*(s-2)+1], s-2, MPI::CHAR, n.b,  1,
+                         &w[1],         s-2, MPI::CHAR, n.t,  1, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
 
-        MPI_Sendrecv(&w[s*(s-2)+1], s-2, MPI::CHAR, n.b,  1,
-                     &w[1],         s-2, MPI::CHAR, n.t,  1, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+            // Exchange diagonal elements
+            MPI_Sendrecv(&w[s+1],         1, MPI::CHAR, n.tl, 2,
+                         &w[s*s-1],       1, MPI::CHAR, n.br, 2, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
 
-        // Exchange diagonal elements
-        MPI_Sendrecv(&w[s+1],         1, MPI::CHAR, n.tl, 2,
-                     &w[s*s-1],       1, MPI::CHAR, n.br, 2, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+            MPI_Sendrecv(&w[s*(s-2)+s-2], 1, MPI::CHAR, n.br, 3,
+                         &w[0],           1, MPI::CHAR, n.tl, 3, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
 
-        MPI_Sendrecv(&w[s*(s-2)+s-2], 1, MPI::CHAR, n.br, 3,
-                     &w[0],           1, MPI::CHAR, n.tl, 3, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+            MPI_Sendrecv(&w[s+s-2],       1, MPI::CHAR, n.tr, 4,
+                         &w[s*(s-1)],     1, MPI::CHAR, n.bl, 4, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
 
-        MPI_Sendrecv(&w[s+s-2],       1, MPI::CHAR, n.tr, 4,
-                     &w[s*(s-1)],     1, MPI::CHAR, n.bl, 4, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+            MPI_Sendrecv(&w[s*(s-2)+1],   1, MPI::CHAR, n.bl, 5,
+                         &w[s-1],         1, MPI::CHAR, n.tr, 5, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+           
+            // Exchange left and right columns
+            MPI_Sendrecv(&w[s+1],         1, GRID_COLUMNS,       n.l,  6,
+                         &w[s+s-1],       1, GRID_COLUMNS,       n.r,  6, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
 
-        MPI_Sendrecv(&w[s*(s-2)+1],   1, MPI::CHAR, n.bl, 5,
-                     &w[s-1],         1, MPI::CHAR, n.tr, 5, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-       
-        // Exchange left and right columns
-        MPI_Sendrecv(&w[s+1],         1, GRID_COLUMNS,       n.l,  6,
-                     &w[s+s-1],       1, GRID_COLUMNS,       n.r,  6, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+            MPI_Sendrecv(&w[s+s-2],       1, GRID_COLUMNS,       n.r,  7,
+                         &w[s],           1, GRID_COLUMNS,       n.l,  7, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+            time_stamps.stop(task_name::comm);
 
-        MPI_Sendrecv(&w[s+s-2],       1, GRID_COLUMNS,       n.r,  7,
-                     &w[s],           1, GRID_COLUMNS,       n.l,  7, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-        time_stamps.stop(task_name::comm);
+            // Compute external cells
+            time_stamps.start(task_name::external);
 
-        // Compute external cells
-        time_stamps.start(task_name::external);
+            // Compute top and bottom rows
+            sts.parallel_for("external_loop_tb", 1, s-1, [&](int y)
+            {
+                next_gen_cell(s+y);
+                next_gen_cell(s*(s-2)+y);
+            });
 
-        // Compute top and bottom rows
-        for (int y=1; y<s-1; y++) {
-            next_gen_cell(s+y);
-            next_gen_cell(s*(s-2)+y);
-        }
-
-        // Compute left and right columns
-        for (int x=1; x<s-1; x++) {
-            next_gen_cell(s*x+1);
-            next_gen_cell(s*x+s-2);
-        }
-        time_stamps.stop(task_name::external);
+            // Compute left and right columns
+            sts.parallel_for("external_loop_lr", 1, s-1, [&](int x)
+            {
+                next_gen_cell(s*x+1);
+                next_gen_cell(s*x+s-2);
+            });
+            time_stamps.stop(task_name::external);
+        });
+        sts.wait();
 
         // Commit changes by swapping worlds
         old_world.swap(new_world);
@@ -347,7 +357,7 @@ class GOL
     }
 
     private:
-    bool init(int s, int ws)
+    bool init(int s, int ws, bool useDefaultSchedule)
     {
         MPI_Comm_rank(MPI_COMM_WORLD, &rank);
 
@@ -362,6 +372,21 @@ class GOL
 
         MPI_Type_vector(size-2, 1, size, MPI::CHAR, &GRID_COLUMNS);
         MPI_Type_commit(&GRID_COLUMNS);
+
+        int nthreads = STS::getNumThreads();
+        // Must have two threads to overlap compute and comm
+        if (useDefaultSchedule || nthreads < 2) sts.setDefaultSchedule();
+        else
+        {
+            std::vector<int> workerThreads(nthreads-1);
+            std::iota(workerThreads.begin(), workerThreads.end(), 1);
+            sts.assign_run("internal", 1);
+            sts.assign_loop("internal_loop", workerThreads);
+            sts.assign_run("external", 0);
+            // External is fast. It is more costly to wait on other threads.
+            sts.assign_loop("external_loop_tb", 0);
+            sts.assign_loop("external_loop_lr", 0);
+        }
 
         old_world.assign(size*size,0);
         new_world.assign(size*size,0);
@@ -411,6 +436,7 @@ class GOL
     int wsize; // Global size ( sqrt(no. of MPI ranks) )
     MPI_Datatype GRID_COLUMNS; // Used for communicating columns
     TimeStamps time_stamps;
+    STS sts;
     world_grid old_world;
     world_grid new_world;
 };
@@ -429,20 +455,16 @@ int main(int argc, char **argv)
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &nranks);
 
-    if (argc < 3)
+
+    if (argc < 4)
     {
-        if (rank==0) fprintf(stderr, "Usage: %s <input file> <no. generations> <print size> <print frequency>\n", argv[0]);
+        if (rank==0) fprintf(stderr, "Usage: %s <input file> <no. generations> <no. threads> <print size> <print frequency>\n", argv[0]);
         MPI_Finalize();
         exit(1);
     }
 
-    // Define GOL constants
-    const int wsize      = sqrt(nranks);
-    const int num_gens   = atoi(argv[2]);
-    int print_max_size = 100;
-    if (argc > 3) print_max_size = atoi(argv[3]);
-    int print_freq       = num_gens-1; // Print first and last generations only by default
-    if (argc > 4) print_freq = atoi(argv[4]);
+    // Parse command-line arguments and define GOL parameters
+    const int wsize = sqrt(nranks);
     if (wsize*wsize != nranks)
     {
         if (rank==0) fprintf(stderr, "Error: No. MPI ranks must be a perfect square\n");
@@ -450,7 +472,32 @@ int main(int argc, char **argv)
         exit(1);
     }
 
-    GOL world(argv[1],wsize);
+    const int num_gens = atoi(argv[2]);
+
+    int nthreads = atoi(argv[3]);
+    bool useDefaultSchedule = false;
+    if (nthreads == 0)
+    {
+        if (rank==0) fprintf(stderr, "Error: No. threads cannot be 0\n");
+        MPI_Finalize();
+        exit(1);
+    }
+    // A negative number of threads means to use the default STS schedule
+    // (fully parallelize loops without overlapping compute and comm)
+    else if (nthreads < 0)
+    {
+        nthreads *= -1;
+        useDefaultSchedule = true;
+    }
+
+    int print_max_size = 100;
+    if (argc > 4) print_max_size = atoi(argv[4]);
+    int print_freq = num_gens-1; // Print first and last generations only by default
+    if (argc > 5) print_freq = atoi(argv[5]);
+
+    STS::startup(nthreads);
+
+    GOL world(argv[1], wsize, useDefaultSchedule);
     if (rank==0 && !world.world_is_valid()) MPI_Abort(MPI_COMM_WORLD,1);
     long start_time = TimeStamps::get_time();
     if (world.world_is_valid())
@@ -480,6 +527,7 @@ int main(int argc, char **argv)
     }
 
     // Exit
+    STS::shutdown();
     MPI_Finalize();
     return 0;
 }
