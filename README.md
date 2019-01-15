@@ -10,7 +10,7 @@ that can be used to test the performance of different threading frameworks.
 <br>
 
 ### Running the Program
-**Usage: ./pargol [input file] [no. generations] [print frequency]**
+**Usage: ./pargol [input file] [no. generations] [print size] [print frequency]**
 
 Example input files are included. Each contains a header with two numbers, size  
 and number of repetitions. The first gives the size n of the game board given in  
@@ -22,7 +22,10 @@ used for the other cells.
 
 The number of generations indicates the number of iterations of the game to run.
 
-The print frequency, *p*, is optional. By default, only the first and last  
+The print size is optional and is the number of rows and columns to print.  
+Default size is 100.
+
+The print frequency, *p*, is also optional. By default, only the first and last  
 generations are printed. If given, the board is printed every p iterations  
 (1 prints all iterations, 2 every other iteration, etc.).
 
