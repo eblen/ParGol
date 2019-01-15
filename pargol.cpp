@@ -472,10 +472,11 @@ int main(int argc, char **argv)
     {
         const TimeStamps& ts = world.get_time_stamps();
         printf("Total GOL run time: %1.2f ms\n", (end_time - start_time) / 1000.0);
-        printf("Time for internal compute: %1.2f ms\n", ts.get_total_time(GOL::task_name::internal) / 1000.0);
-        printf("Time for communication:    %1.2f ms\n", ts.get_total_time(GOL::task_name::comm)     / 1000.0);
-        printf("Time for external compute: %1.2f ms\n", ts.get_total_time(GOL::task_name::external) / 1000.0);
-        printf("Internal and comm overlap: %1.2f ms\n", ts.get_overlap(GOL::task_name::internal, GOL::task_name::comm) / 1000.0);
+        printf("Time for internal compute:     %1.2f ms\n", ts.get_total_time(GOL::task_name::internal) / 1000.0);
+        printf("Time for communication:        %1.2f ms\n", ts.get_total_time(GOL::task_name::comm)     / 1000.0);
+        printf("Time for external compute:     %1.2f ms\n", ts.get_total_time(GOL::task_name::external) / 1000.0);
+        printf("Internal and comm overlap:     %1.2f ms\n", ts.get_overlap(GOL::task_name::internal, GOL::task_name::comm)     / 1000.0);
+        printf("Internal and external overlap: %1.2f ms\n", ts.get_overlap(GOL::task_name::internal, GOL::task_name::external) / 1000.0);
     }
 
     // Exit
