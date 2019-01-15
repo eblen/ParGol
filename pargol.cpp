@@ -8,6 +8,8 @@
 #include <string>
 #include <vector>
 
+#include "tbb/parallel_for.h"
+#include "tbb/parallel_invoke.h"
 #include "timestamps.h"
 
 // Generic function for computing neighbor indices of a cell
@@ -178,66 +180,73 @@ class GOL
     {
         int s = size;
 
-        // Compute internal cells
-        time_stamps.start(task_name::internal);
-        for (int x=2; x<s-2; x++)
-        {
-            for (int y=2; y<s-2; y++)
-            {
-                next_gen_cell(x*s+y);
-            }
-        }
-        time_stamps.stop(task_name::internal);
-
         grid_nbrs n = get_grid_nbrs(rank,wsize);
         world_grid &w = old_world;
 
+        tbb::parallel_invoke(
+
+        // Compute internal cells
+        [&]{
+            time_stamps.start(task_name::internal);
+            tbb::parallel_for(2, s-2, [&](int x)
+            {
+                for (int y=2; y<s-2; y++)
+                {
+                    next_gen_cell(x*s+y);
+                }
+            });
+            time_stamps.stop(task_name::internal);
+        },
+
         // Exchange external cells with other ranks
-        time_stamps.start(task_name::comm);
+        [&]{
+            time_stamps.start(task_name::comm);
+            // Exchange top and bottom rows
+            MPI_Sendrecv(&w[s+1],       s-2, MPI::CHAR, n.t,  0,
+                         &w[s*(s-1)+1], s-2, MPI::CHAR, n.b,  0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
 
-        // Exchange top and bottom rows
-        MPI_Sendrecv(&w[s+1],       s-2, MPI::CHAR, n.t,  0,
-                     &w[s*(s-1)+1], s-2, MPI::CHAR, n.b,  0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+            MPI_Sendrecv(&w[s*(s-2)+1], s-2, MPI::CHAR, n.b,  1,
+                         &w[1],         s-2, MPI::CHAR, n.t,  1, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
 
-        MPI_Sendrecv(&w[s*(s-2)+1], s-2, MPI::CHAR, n.b,  1,
-                     &w[1],         s-2, MPI::CHAR, n.t,  1, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+            // Exchange diagonal elements
+            MPI_Sendrecv(&w[s+1],         1, MPI::CHAR, n.tl, 2,
+                         &w[s*s-1],       1, MPI::CHAR, n.br, 2, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
 
-        // Exchange diagonal elements
-        MPI_Sendrecv(&w[s+1],         1, MPI::CHAR, n.tl, 2,
-                     &w[s*s-1],       1, MPI::CHAR, n.br, 2, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+            MPI_Sendrecv(&w[s*(s-2)+s-2], 1, MPI::CHAR, n.br, 3,
+                         &w[0],           1, MPI::CHAR, n.tl, 3, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
 
-        MPI_Sendrecv(&w[s*(s-2)+s-2], 1, MPI::CHAR, n.br, 3,
-                     &w[0],           1, MPI::CHAR, n.tl, 3, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+            MPI_Sendrecv(&w[s+s-2],       1, MPI::CHAR, n.tr, 4,
+                         &w[s*(s-1)],     1, MPI::CHAR, n.bl, 4, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
 
-        MPI_Sendrecv(&w[s+s-2],       1, MPI::CHAR, n.tr, 4,
-                     &w[s*(s-1)],     1, MPI::CHAR, n.bl, 4, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+            MPI_Sendrecv(&w[s*(s-2)+1],   1, MPI::CHAR, n.bl, 5,
+                         &w[s-1],         1, MPI::CHAR, n.tr, 5, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+           
+            // Exchange left and right columns
+            MPI_Sendrecv(&w[s+1],         1, GRID_COLUMNS,       n.l,  6,
+                         &w[s+s-1],       1, GRID_COLUMNS,       n.r,  6, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
 
-        MPI_Sendrecv(&w[s*(s-2)+1],   1, MPI::CHAR, n.bl, 5,
-                     &w[s-1],         1, MPI::CHAR, n.tr, 5, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-       
-        // Exchange left and right columns
-        MPI_Sendrecv(&w[s+1],         1, GRID_COLUMNS,       n.l,  6,
-                     &w[s+s-1],       1, GRID_COLUMNS,       n.r,  6, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+            MPI_Sendrecv(&w[s+s-2],       1, GRID_COLUMNS,       n.r,  7,
+                         &w[s],           1, GRID_COLUMNS,       n.l,  7, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+            time_stamps.stop(task_name::comm);
 
-        MPI_Sendrecv(&w[s+s-2],       1, GRID_COLUMNS,       n.r,  7,
-                     &w[s],           1, GRID_COLUMNS,       n.l,  7, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-        time_stamps.stop(task_name::comm);
+            // Compute external cells
+            time_stamps.start(task_name::external);
 
-        // Compute external cells
-        time_stamps.start(task_name::external);
+            // Compute top and bottom rows
+            tbb::parallel_for(1, s-1, [&](int y)
+            {
+                next_gen_cell(s+y);
+                next_gen_cell(s*(s-2)+y);
+            });
 
-        // Compute top and bottom rows
-        for (int y=1; y<s-1; y++) {
-            next_gen_cell(s+y);
-            next_gen_cell(s*(s-2)+y);
-        }
-
-        // Compute left and right columns
-        for (int x=1; x<s-1; x++) {
-            next_gen_cell(s*x+1);
-            next_gen_cell(s*x+s-2);
-        }
-        time_stamps.stop(task_name::external);
+            // Compute left and right columns
+            tbb::parallel_for(1, s-1, [&](int x)
+            {
+                next_gen_cell(s*x+1);
+                next_gen_cell(s*x+s-2);
+            });
+            time_stamps.stop(task_name::external);
+        });
 
         // Commit changes by swapping worlds
         old_world.swap(new_world);
